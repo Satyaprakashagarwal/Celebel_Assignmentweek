@@ -1,32 +1,55 @@
-# RAG Tutorial (2026 refresh, Streamlit UI, hybrid smart retrieval)
+# Chat With Your PDFs — RAG + Streamlit + MongoDB
 
-A local Retrieval-Augmented Generation app: index your PDFs into a Chroma
-vector database, then ask questions and get answers grounded only in those
-documents.
+A local Retrieval-Augmented Generation (RAG) app. Drop some PDFs in, and ask
+questions about them in a chat UI — answers are grounded only in what's
+actually in your documents, with sources shown for every reply. It also
+remembers things about you (and your past questions) across sessions using
+MongoDB, so it gets a bit more personalized the more you use it.
 
-This version adds a "smarter brain" on top of the original tutorial logic:
+Started from the classic "RAG Tutorial v2" pattern (PDFs → Chroma → local
+LLM), then extended with a hybrid retriever, a free hosted LLM, and
+long-term memory.
 
-- **Better embeddings** — local Hugging Face `BAAI/bge-small-en-v1.5`
-  instead of `nomic-embed-text`, for stronger semantic matching.
-- **Hybrid retrieval** — combines keyword search (BM25, great for exact
-  words) with semantic vector search (great for paraphrases/synonyms) via
-  LangChain's `EnsembleRetriever`.
-- **Query rewriting** — `MultiQueryRetriever` uses the LLM to generate a
-  few alternative phrasings of your question before searching, which fixes
-  most typos and awkward wording automatically.
-- **Spell correction** — a lightweight pass with `pyspellchecker` cleans up
-  obviously misspelled words before keyword search.
-- **A smart, free LLM** — [Groq](https://console.groq.com/keys)'s free API
-  serving Llama 3.3 70B, which is great at understanding sloppy/paraphrased
-  questions.
+## What it does
+
+- **Ask questions about your PDFs** and get answers built only from the
+  content it retrieves — if the docs don't cover it, it says so instead of
+  guessing.
+- **Understands typos and rephrased questions.** A single vector search is
+  surprisingly brittle — this app layers a few things on top so sloppy
+  questions still work:
+  - **Better embeddings** — local Hugging Face `BAAI/bge-small-en-v1.5`
+    instead of a weaker model, for stronger semantic matching.
+  - **Hybrid retrieval** — keyword search (BM25) combined with vector
+    search via LangChain's `EnsembleRetriever`, so both exact wording and
+    paraphrasing work.
+  - **Query rewriting** — `MultiQueryRetriever` asks the LLM to generate a
+    few alternative phrasings of your question before searching.
+  - **Spell correction** — a lightweight `pyspellchecker` pass cleans up
+    obviously misspelled words before keyword search runs.
+- **Fast, free LLM** — answers come from [Groq](https://console.groq.com/keys)'s
+  free API running Llama 3.3 70B.
+- **Remembers you across sessions** — MongoDB stores durable preferences
+  ("I'm new to board games", "keep answers short") pulled automatically
+  from your messages, plus a running history of past Q&A. Both get folded
+  back into future prompts, so the app can stay personalized even after
+  you close and reopen it. If MongoDB isn't reachable, this feature just
+  turns itself off — the rest of the app keeps working.
+- **Manage documents from the sidebar** — upload PDFs, build/update the
+  vector database, delete a single document (and only its chunks), or wipe
+  everything and start fresh.
 
 ## Requirements
 
 - Python 3.10+
-- A free [Groq API key](https://console.groq.com/keys) (no local model
-  download needed, very fast).
-- No API key needed for embeddings — the default embedding model runs
-  locally via `sentence-transformers` (downloaded once, then cached).
+- A free [Groq API key](https://console.groq.com/keys) — this is what
+  actually answers your questions. No local model download needed.
+- MongoDB, if you want the "remembers you" feature. Optional — the app
+  runs fine without it, it just won't have long-term memory. Easiest way
+  to get one running locally is `docker run -d -p 27017:27017 mongo`, or
+  use a free [MongoDB Atlas](https://www.mongodb.com/atlas) cluster.
+- No API key needed for embeddings — that model runs 100% locally via
+  `sentence-transformers` (downloaded once, then cached).
 
 ## Setup
 
@@ -36,13 +59,21 @@ source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Optional: copy `.env.example` to `.env` and paste in your Groq key so you
-don't have to type it into the sidebar every time:
+Copy `.env.example` to `.env` and fill in your Groq key (and MongoDB
+settings, if you're using that):
 
 ```bash
 cp .env.example .env
-# edit .env and set GROQ_API_KEY=gsk_...
 ```
+
+```
+GROQ_API_KEY=gsk_...
+MONGODB_URI=mongodb://localhost:27017   # optional, this is the default
+MONGODB_DB=rag_chat_app                 # optional, this is the default
+```
+
+If you skip the `.env` file, you can also paste your Groq key straight
+into the Streamlit sidebar each time.
 
 ## Option A: Streamlit UI (recommended)
 
@@ -50,13 +81,20 @@ cp .env.example .env
 streamlit run app.py
 ```
 
-In the browser:
-1. In the sidebar, paste your free Groq API key.
-2. Upload PDF(s) (or keep the two sample PDFs already in `data/`).
-3. Click **Build / Update DB**.
-4. Ask questions in the chat box — including paraphrased or slightly
-   misspelled ones. Answers show their source chunks under "Sources".
-5. Use **Reset DB** to wipe the vector store and start over.
+Then in the browser:
+
+1. Confirm your Groq key is picked up (sidebar shows an error if it's
+   missing).
+2. Upload PDF(s), or just use the two sample PDFs already in `data/`
+   (Monopoly and Ticket to Ride rulebooks).
+3. Click **Build Database**.
+4. Ask questions in the chat box — typos and paraphrased questions are
+   fine. Each answer shows its source chunks under "Sources".
+5. Use **Delete** next to a file to remove just that document, or
+   **Delete All** to wipe the whole vector store and start over.
+6. If MongoDB is connected, the sidebar also shows what the app has
+   learned about you so far, with a **Forget Everything** button to clear
+   it.
 
 ## Option B: Command line
 
@@ -69,6 +107,9 @@ python populate_database.py --reset   # wipe and rebuild from scratch
 python query_data.py "How much money does a player start with in Monopoly?"
 ```
 
+(The CLI path doesn't use the MongoDB memory feature — that's wired up in
+the Streamlit app only.)
+
 ## Run tests
 
 ```bash
@@ -78,30 +119,21 @@ pytest test_rag.py
 ## Project structure
 
 ```
-data/                    # Put your PDFs here
-get_embedding_function.py# Embedding model (local HuggingFace BGE by default)
-llm_provider.py          # Sets up the Groq (free API) LLM
-retriever.py             # Hybrid BM25 + vector retriever, query rewriting, spell-check
-populate_database.py     # CLI: load -> split -> embed -> store in Chroma
-query_data.py            # CLI: retrieve -> prompt -> answer
-app.py                   # Streamlit UI wrapping the same logic
-test_rag.py              # Basic answer-quality tests
+data/                       # Put your PDFs here
+get_embedding_function.py   # Embedding model (local HuggingFace BGE by default)
+llm_provider.py             # Sets up the Groq (free API) LLM
+retriever.py                # Hybrid BM25 + vector retriever, query rewriting, spell-check
+memory_store.py             # MongoDB-backed long-term memory (preferences + history)
+populate_database.py        # CLI: load -> split -> embed -> store in Chroma
+query_data.py                # CLI: retrieve -> prompt -> answer
+app.py                        # Streamlit UI wrapping the same logic + memory
+test_rag.py                   # Basic answer-quality tests
 ```
 
-## Why answers were too literal before, and what changed
+## Why this needed more than a basic vector search
 
-The original setup only did a single semantic vector search (5 chunks) with
-a weak local embedding model, then handed the result straight to a small 7B
-model. That combination is very sensitive to exact wording:
-
-- A typo shifts the embedding just enough to miss the right chunk.
-- A paraphrased question ("what languages does he know" vs "technical
-  skills") may not land close enough in vector space to the original PDF
-  wording.
-- A small local model, even with the right context, is weaker at reading
-  between the lines than larger models.
-
-This version addresses each layer:
+A plain setup — one semantic vector search, five chunks, a small local
+model — is very sensitive to exact wording:
 
 | Problem | Fix |
 |---|---|
@@ -109,7 +141,9 @@ This version addresses each layer:
 | Only semantic search | Added BM25 keyword search, merged via `EnsembleRetriever` |
 | Typos / odd phrasing | `MultiQueryRetriever` rewrites the question a few ways using the LLM, plus a `pyspellchecker` pass |
 | Weak LLM | Groq `llama-3.3-70b-versatile` (free API), strong at handling sloppy questions |
-| Too few chunks | Raised `k` from 5 to 8 and switched to MMR search for more diverse context |
+| Too few chunks | Raised `k` from 5 to 8 |
+| No memory across sessions | Added MongoDB-backed preferences + interaction history, folded into every prompt |
 
 A free Groq API key is required to run the LLM (embeddings still run
-100% locally, no key needed for those).
+100% locally, no key needed for those). MongoDB is optional and only
+powers the long-term memory feature in the Streamlit app.
